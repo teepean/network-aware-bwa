@@ -1,6 +1,7 @@
-*.[oh]
+*.[oa]
 bwa
-depend.mk
-tags
-bwt_gen/libbwtgen.a
-
+test
+test64
+.*.swp
+Makefile.bak
+bwamem-lite

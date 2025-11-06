@@ -3,7 +3,11 @@
 #include <stdio.h>
 #include "bwt_lite.h"
 
-int is_sa(const uint8_t *T, uint32_t *SA, int n);
+#ifdef USE_MALLOC_WRAPPERS
+#  include "malloc_wrap.h"
+#endif
+
+int is_sa(const uint8_t *T, int *SA, int n);
 int is_bwt(uint8_t *T, int n);
 
 bwtl_t *bwtl_seq2bwtl(int len, const uint8_t *seq)
@@ -16,7 +20,7 @@ bwtl_t *bwtl_seq2bwtl(int len, const uint8_t *seq)
 	{ // calculate b->bwt
 		uint8_t *s;
 		b->sa = (uint32_t*)calloc(len + 1, 4);
-		is_sa(seq, b->sa, len);
+		is_sa(seq, (int*)b->sa, len);
 		s = (uint8_t*)calloc(len + 1, 1);
 		for (i = 0; i <= len; ++i) {
 			if (b->sa[i] == 0) b->primary = i;
@@ -44,7 +48,7 @@ bwtl_t *bwtl_seq2bwtl(int len, const uint8_t *seq)
 	}
 	{ // generate cnt_table
 		for (i = 0; i != 256; ++i) {
-			u_int32_t j, x = 0;
+			uint32_t j, x = 0;
 			for (j = 0; j != 4; ++j)
 				x |= (((i&3) == j) + ((i>>2&3) == j) + ((i>>4&3) == j) + (i>>6 == j)) << (j<<3);
 			b->cnt_table[i] = x;
@@ -52,7 +56,7 @@ bwtl_t *bwtl_seq2bwtl(int len, const uint8_t *seq)
 	}
 	return b;
 }
-inline uint32_t bwtl_occ(const bwtl_t *bwt, uint32_t k, uint8_t c)
+uint32_t bwtl_occ(const bwtl_t *bwt, uint32_t k, uint8_t c)
 {
 	uint32_t n, b;
 	if (k == bwt->seq_len) return bwt->L2[c+1] - bwt->L2[c];
@@ -65,7 +69,7 @@ inline uint32_t bwtl_occ(const bwtl_t *bwt, uint32_t k, uint8_t c)
 	if (c == 0) n -= 15 - (k&15); // corrected for the masked bits
 	return n;
 }
-inline void bwtl_occ4(const bwtl_t *bwt, uint32_t k, uint32_t cnt[4])
+void bwtl_occ4(const bwtl_t *bwt, uint32_t k, uint32_t cnt[4])
 {
 	uint32_t x, b;
 	if (k == (uint32_t)(-1)) {
@@ -80,7 +84,7 @@ inline void bwtl_occ4(const bwtl_t *bwt, uint32_t k, uint32_t cnt[4])
 	x -= 15 - (k&15);
 	cnt[0] += x&0xff; cnt[1] += x>>8&0xff; cnt[2] += x>>16&0xff; cnt[3] += x>>24;
 }
-inline void bwtl_2occ4(const bwtl_t *bwt, uint32_t k, uint32_t l, uint32_t cntk[4], uint32_t cntl[4])
+void bwtl_2occ4(const bwtl_t *bwt, uint32_t k, uint32_t l, uint32_t cntk[4], uint32_t cntl[4])
 {
 	bwtl_occ4(bwt, k, cntk);
 	bwtl_occ4(bwt, l, cntl);
