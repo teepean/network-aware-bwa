@@ -32,11 +32,11 @@ endif
 .c.o:
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) $(CPPFLAGS) $< -o $@
 
+all: $(PROG)
+
 # Special rule for bam2bam.c - compile without malloc wrappers to avoid macro conflicts
 bam2bam.o: bam2bam.c
 		$(CC) -c $(CFLAGS) -DHAVE_PTHREAD $(INCLUDES) $(CPPFLAGS) $< -o $@
-
-all:$(PROG)
 
 bwa:libbwa.a $(AOBJS) main.o
 		$(CC) $(CFLAGS) $(LDFLAGS) $(AOBJS) main.o -o $@ -L. -lbwa $(LIBS)
