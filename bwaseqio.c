@@ -2,9 +2,14 @@
 #include <ctype.h>
 #include "bwtaln.h"
 #include "utils.h"
+#include "bamlite.h"
 
 #include "kseq.h"
-KSEQ_INIT(gzFile, gzread)
+KSEQ_DECLARE(gzFile)
+
+#ifdef USE_MALLOC_WRAPPERS
+#  include "malloc_wrap.h"
+#endif
 
 extern unsigned char nst_nt4_table[256];
 static char bam_nt16_nt4_table[] = { 4, 0, 1, 4, 2, 4, 4, 4, 3, 4, 4, 4, 4, 4, 4, 4 };
@@ -15,51 +20,51 @@ struct __bwa_seqio_t {
 	bamFile fp;
 	// for fastq input
 	kseq_t *ks;
-    // in case sai failes available
-    FILE *sai[3];
+	// in case sai files available
+	FILE *sai[3];
 };
 
 bwa_seqio_t *bwa_bam_open(const char *fn, int which, char **saif,
                           gap_opt_t *o0, bam_header_t **hh)
 {
-    int c, b=0;
+	int c, b=0;
 	bwa_seqio_t *bs;
 	bam_header_t *h;
 	bs = (bwa_seqio_t*)calloc(1, sizeof(bwa_seqio_t));
 	bs->is_bam = 1;
 	bs->which = which;
-    bs->fp = (fn[0]!='-' || fn[1]) ? bam_open(fn, "r") : bam_dopen(0, "r") ;
+	bs->fp = (fn[0]!='-' || fn[1]) ? bam_open(fn, "r") : bam_dopen(0, "r") ;
 	h = bam_header_read(bs->fp);
 	if(hh) *hh=h; else bam_header_destroy(h);
 
-    if( saif ) for(c=0;c!=3;++c)
-    {
-        gap_opt_t opt;
-        if( saif[c] ) {
-            bs->sai[c] = xopen(saif[c], "r");
-            if( 1 > fread(&opt, sizeof(gap_opt_t), 1, bs->sai[c]) )
-            {
-                fclose(bs->sai[c]); 
-                bs->sai[c] = 0;
-            }
-            opt.n_threads=o0->n_threads;
-            if(o0) {
-                if(b) {
-                    opt.mode=o0->mode;
-                    if( memcmp(o0, &opt, sizeof(gap_opt_t)) ) {
-                        fprintf( stderr, "[bwa_bam_open] options from sai file \"%s\" conflict with others.\n", saif[c] ) ;
-                        exit(1);
-                    }
-                    fprintf( stderr, "[bwa_bam_open] options from sai file \"%s\" match.\n", saif[c] ) ;
-                }
-                else {
-                    fprintf( stderr, "[bwa_bam_open] recovered options from sai file \"%s\".\n", saif[c] ) ;
-                    memcpy(o0, &opt, sizeof(gap_opt_t));
-                    b=1;
-                }
-            }
-        }
-    }
+	if( saif ) for(c=0;c!=3;++c)
+	{
+		gap_opt_t opt;
+		if( saif[c] ) {
+			bs->sai[c] = xopen(saif[c], "r");
+			if( 1 > fread(&opt, sizeof(gap_opt_t), 1, bs->sai[c]) )
+			{
+				fclose(bs->sai[c]);
+				bs->sai[c] = 0;
+			}
+			opt.n_threads=o0->n_threads;
+			if(o0) {
+				if(b) {
+					opt.mode=o0->mode;
+					if( memcmp(o0, &opt, sizeof(gap_opt_t)) ) {
+						fprintf( stderr, "[bwa_bam_open] options from sai file \"%s\" conflict with others.\n", saif[c] ) ;
+						exit(1);
+					}
+					fprintf( stderr, "[bwa_bam_open] options from sai file \"%s\" match.\n", saif[c] ) ;
+				}
+				else {
+					fprintf( stderr, "[bwa_bam_open] recovered options from sai file \"%s\".\n", saif[c] ) ;
+					memcpy(o0, &opt, sizeof(gap_opt_t));
+					b=1;
+				}
+			}
+		}
+	}
 	return bs;
 }
 
@@ -75,19 +80,20 @@ bwa_seqio_t *bwa_seq_open(const char *fn)
 
 void bwa_seq_close(bwa_seqio_t *bs)
 {
-    int i;
+	int i;
 	if (bs == 0) return;
-	if (bs->is_bam) bam_close(bs->fp);
-	else {
-		gzclose(bs->ks->f->f);
+	if (bs->is_bam) {
+		if (0 != bam_close(bs->fp)) err_fatal_simple("Error closing bam file");
+	} else {
+		err_gzclose(bs->ks->f->f);
 		kseq_destroy(bs->ks);
 	}
-    for(i=0;i!=3;++i)
-        if(bs->sai[i])
-            fclose(bs->sai[i]);
+	for(i=0;i!=3;++i)
+		if(bs->sai[i])
+			fclose(bs->sai[i]);
 	free(bs);
 }
- 
+
 void seq_reverse(int len, ubyte_t *seq, int is_comp)
 {
 	int i;
@@ -109,35 +115,34 @@ void seq_reverse(int len, ubyte_t *seq, int is_comp)
 
 int bwa_trim_read(int trim_qual, bwa_seq_t *p)
 {
-	int s = 0, l, max = 0, max_l = p->len - 1;
+	int s = 0, l, max = 0, max_l = p->len;
 	if (trim_qual < 1 || p->qual == 0) return 0;
-	for (l = p->len - 1; l >= BWA_MIN_RDLEN - 1; --l) {
+	for (l = p->len - 1; l >= BWA_MIN_RDLEN; --l) {
 		s += trim_qual - (p->qual[l] - 33);
 		if (s < 0) break;
-		if (s > max) {
-			max = s; max_l = l;
-		}
+		if (s > max) max = s, max_l = l;
 	}
-	p->clip_len = p->len = max_l + 1;
+	p->clip_len = p->len = max_l;
 	return p->full_len - p->len;
 }
 
-bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_comp, int trim_qual)
+static bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_comp, int trim_qual)
 {
 	bwa_seq_t *seqs, *p;
 	int n_seqs, l, i;
 	long n_trimmed = 0, n_tot = 0;
 	bam1_t *b;
+	int res;
 
 	b = bam_init1();
 	n_seqs = 0;
 	seqs = (bwa_seq_t*)calloc(n_needed, sizeof(bwa_seq_t));
-	while (bam_read1(bs->fp, b) >= 0) {
+	while ((res = bam_read1(bs->fp, b)) >= 0) {
 		uint8_t *s, *q;
 		int go = 0;
-		if ((bs->which & 1) &&  (b->core.flag & BAM_FPAIRED) && (b->core.flag & BAM_FREAD1)) go = 1;
-		if ((bs->which & 2) &&  (b->core.flag & BAM_FPAIRED) && (b->core.flag & BAM_FREAD2)) go = 1;
-		if ((bs->which & 4) && !(b->core.flag & BAM_FPAIRED)) go = 1;
+		if ((bs->which & 1) && (b->core.flag & BAM_FREAD1)) go = 1;
+		if ((bs->which & 2) && (b->core.flag & BAM_FREAD2)) go = 1;
+		if ((bs->which & 4) && !(b->core.flag& BAM_FREAD1) && !(b->core.flag& BAM_FREAD2))go = 1;
 		if (go == 0) continue;
 		l = b->core.l_qseq;
 		p = &seqs[n_seqs++];
@@ -164,6 +169,7 @@ bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_comp, int 
 		p->name = strdup((const char*)bam1_qname(b));
 		if (n_seqs == n_needed) break;
 	}
+	if (res < 0 && res != -1) err_fatal_simple("Error reading bam file");
 	*n = n_seqs;
 	if (n_seqs && trim_qual >= 1)
 		fprintf(stderr, "[bwa_read_seq] %.1f%% bases are trimmed.\n", 100.0f * n_trimmed/n_tot);
@@ -222,7 +228,7 @@ bwa_seq_t *bwa_read_seq(bwa_seqio_t *bs, int n_needed, int *n, int mode, int tri
 		p->qual = 0;
 		p->full_len = p->clip_len = p->len = l;
 		n_tot += p->full_len;
-		p->seq = (ubyte_t*)calloc(p->len, 1);
+		p->seq = (ubyte_t*)calloc(p->full_len, 1);
 		for (i = 0; i != p->full_len; ++i)
 			p->seq[i] = nst_nt4_table[(int)seq->seq.s[i]];
 		if (seq->qual.l) { // copy quality
@@ -235,7 +241,7 @@ bwa_seq_t *bwa_read_seq(bwa_seqio_t *bs, int n_needed, int *n, int mode, int tri
 		seq_reverse(p->len, p->rseq, is_comp);
 		p->name = strdup((const char*)seq->name.s);
 		{ // trim /[12]$
-			int t = strlen(p->name);
+			int t = seq->name.l;
 			if (t > 2 && p->name[t-2] == '/' && (p->name[t-1] == '1' || p->name[t-1] == '2')) p->name[t-2] = '\0';
 		}
 		if (n_seqs == n_needed) break;
@@ -253,22 +259,21 @@ bwa_seq_t *bwa_read_seq(bwa_seqio_t *bs, int n_needed, int *n, int mode, int tri
 void bwa_free_read_seq1(bwa_seq_t *p)
 {
 	int j;
-    for (j = 0; j < p->n_multi; ++j)
-        if (p->multi[j].cigar) free(p->multi[j].cigar);
-    free(p->name);
-    free(p->seq); free(p->rseq); free(p->qual); free(p->aln); free(p->md); free(p->multi);
-    free(p->cigar);
+	for (j = 0; j < p->n_multi; ++j)
+		if (p->multi[j].cigar) free(p->multi[j].cigar);
+	free(p->name);
+	free(p->seq); free(p->rseq); free(p->qual); free(p->aln); free(p->md); free(p->multi);
+	free(p->cigar);
 }
 
 void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs)
 {
 	int i;
-	for (i = 0; i != n_seqs; ++i)
-        bwa_free_read_seq1( seqs+i ) ;
+	for (i = 0; i != n_seqs; ++i) {
+		bwa_free_read_seq1(seqs + i);
+	}
 	free(seqs);
 }
-
-// Mostly stolen from bwa_read_bam.
 void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp, int trim_qual)
 {
     // long n_trimmed = 0;
@@ -384,7 +389,7 @@ static int read_bam_pair_core(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broke
                         if( !num_wrong_pair ) 
                             fprintf( stderr, "[read_bam_pair] too many mismatched names, not reporting anymore.\n" ) ;
                     }
-                    try_get_sai( bs->sai, flag1 & BAM_FREAD1 ? 1 : 2, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) ;
+                    try_get_sai( NULL, flag1 & BAM_FREAD1 ? 1 : 2, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) ;
                     free(pair->bam_rec[0].data);
                     if(pair->bwa_seq[0].n_aln) free(pair->bwa_seq[0].aln);
                     if( !allow_broken ) {
@@ -473,12 +478,12 @@ int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken, int ignor
             ( pair->kind == proper_pair && (pair->bam_rec[1].core.flag & BAM_FUNMAP) == 0 ) ) ) ;
 
     if( pair->kind == singleton ) {
-        if( try_get_sai( bs->sai, 0, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) )
+        if( try_get_sai( NULL, 0, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) )
             pair->phase = aligned ;
     }
     else if( pair->kind == proper_pair ) {
-        if( try_get_sai( bs->sai, 1, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) 
-                + try_get_sai( bs->sai, 2, &pair->bwa_seq[1].n_aln, &pair->bwa_seq[1].aln ) == 2 )
+        if( try_get_sai( NULL, 1, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln )
+                + try_get_sai( NULL, 2, &pair->bwa_seq[1].n_aln, &pair->bwa_seq[1].aln ) == 2 )
             pair->phase = aligned ;
     }
 

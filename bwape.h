@@ -4,6 +4,7 @@
 #include "bwtaln.h"
 #include "kvec.h"
 #include "bntseq.h"
+#include "utils.h"
 
 typedef struct {
 	int n;
@@ -23,7 +24,7 @@ typedef struct {
 #include "ksort.h"
 
 typedef struct {
-	kvec_t(uint64_t) arr;
+	kvec_t(pair64_t) arr;
 	kvec_t(uint64_t) pos[2];
 	kvec_t(bwt_aln1_t) aln[2];
 } pe_data_t;

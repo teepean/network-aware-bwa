@@ -1,9 +1,9 @@
 #ifndef BWTALN_H
 #define BWTALN_H
 
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include "bwt.h"
 #include "bamlite.h"
 
@@ -22,7 +22,6 @@
 #define SAM_FR2 128 // this is read two
 #define SAM_FSC 256 // secondary alignment
 #define SAM_FQC 512 // fails quality control
-#define SAM_FDP 1024 // is a duplicate
 
 #define BWA_AVG_ERR 0.02
 #define BWA_MIN_RDLEN 35 // for read trimming
@@ -33,15 +32,21 @@
 #define bns_pac(pac, k) ((pac)[(k)>>2] >> ((~(k)&3)<<1) & 3)
 #endif
 
+#define FROM_M 0
+#define FROM_I 1
+#define FROM_D 2
+#define FROM_S 3
+
+#define SAI_MAGIC "SAI\1"
+
 typedef struct {
 	bwtint_t w;
 	int bid;
 } bwt_width_t;
 
 typedef struct {
-	uint32_t n_mm:8, n_gapo:8, n_gape:8, a:1;
+	uint64_t n_mm:8, n_gapo:8, n_gape:8, score:20, n_ins:10, n_del:10;
 	bwtint_t k, l;
-	int score;
 } bwt_aln1_t;
 
 typedef uint16_t bwa_cigar_t;
@@ -56,8 +61,9 @@ typedef uint16_t bwa_cigar_t;
 #define __cigar_create(__op, __len) ((__op)<<CIGAR_OP_SHIFT | (__len))
 
 typedef struct {
-	uint32_t pos;
 	uint32_t n_cigar:15, gap:8, mm:8, strand:1;
+	int ref_shift;
+	bwtint_t pos;
 	bwa_cigar_t *cigar;
 } bwt_multi1_t;
 
@@ -77,6 +83,7 @@ typedef struct {
 	// alignment information
 	bwtint_t sa, pos;
 	uint64_t c1:28, c2:28, seQ:8; // number of top1 and top2 hits; single-end mapQ
+	int ref_shift;
 	int n_cigar;
 	bwa_cigar_t *cigar;
 	// for multi-threading only
@@ -86,35 +93,16 @@ typedef struct {
 	// NM and MD tags
 	uint32_t full_len:20, nm:12;
 	char *md;
-    int max_entries;
+	int max_entries;  // for network-aware bwa compatibility
 } bwa_seq_t;
 
-/* The structure of the existing code is sufficiently twisted and warped
- * that I don't see how to untangle it.  So, for bam2bam, reboot the
- * structure.  We start be reading a logical record from the input file:
- * read a sequence, and if it's single ended, keep it as such.  If it's
- * a first or second read, get another one, it should be the other half.
- * Exchange them if necessary, bomb out if one is missing.
- *
- * We further want to keep everything from the original bam file, so we
- * can reproduce it on output.  Therefore, we simply keep the original
- * record.  Here's the new data structure.  If kind is set to singleton,
- * the second read is invalid.
- */
+/* Network-aware bwa extensions */
+enum pair_kind { eof_marker=0, singleton=1, proper_pair=2 } ;
 
-/** Describes the kind of data contained in bam_pair_t, which makes up a
- * logical record.
- */
-enum pair_kind {
-    eof_marker=0,   // end-of-file marker, no paylod
-    singleton=1,    // singleton, only bam_rec[0] and bwa_seq[0] are valid
-    proper_pair=2   // a pair, {bam_rec,bwa_seq}[0] is forward, the other reverse
-} ;
-
-/** Describes the processing phase of a logcal bam record (bam_pair_t),
+/* The pair_phase is tracked to allow multi-stage network distribution,
  * and thereby determines which fields are valid.
  */
-enum pair_phase { 
+enum pair_phase {
     pristine=0,     // fresh input, only bam_rec[] is valid
     aligned=1,      // aligned, bam_rec[] and bwa_seq[].aln are valid
     positioned=2,   // coordinates computed, bam_rec[] and part of bwa_seq[] are valid
@@ -153,11 +141,10 @@ typedef struct {
 } gap_opt_t;
 
 #define BWA_PET_STD   1
-#define BWA_PET_SOLID 2
 
 typedef struct {
 	int max_isize, force_isize;
-	int max_occ, max_occ_se;
+	int max_occ, max_occ_se;  // added max_occ_se for network-aware bwa
 	int n_multi, N_multi;
 	int type, is_sw, is_preload;
 	double ap_prior;
@@ -171,34 +158,30 @@ extern "C" {
 #endif
 
 	gap_opt_t *gap_init_opt();
-	void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt, int nskip);
+	void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt);
 
 	bwa_seqio_t *bwa_seq_open(const char *fn);
 	bwa_seqio_t *bwa_bam_open(const char *fn, int which, char **saif, gap_opt_t *o0, bam_header_t **hh);
 	void bwa_seq_close(bwa_seqio_t *bs);
 	void seq_reverse(int len, ubyte_t *seq, int is_comp);
-    int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken, int drop_aligned);
-    void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp, int trim_qual);
 	bwa_seq_t *bwa_read_seq(bwa_seqio_t *seq, int n_needed, int *n, int mode, int trim_qual);
-    void bwa_free_read_seq1(bwa_seq_t *p);
 	void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs);
 
+	/* Network-aware bwa functions */
+	int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken, int ignore_aligned);
+	void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp, int trim_qual);
+	void bwa_free_read_seq1(bwa_seq_t *p);
+
 	int bwa_cal_maxdiff(int l, double err, double thres);
-	void bwa_cal_sa_reg_gap(bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt);
+	void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt);
 
 	void bwa_cs2nt_core(bwa_seq_t *p, bwtint_t l_pac, ubyte_t *pac);
-
-
-	/* rgoya: Temporary clone of aln_path2cigar to accomodate for bwa_cigar_t,
-	__cigar_op and __cigar_len while keeping stdaln stand alone */
-#include "stdaln.h"
-
-	bwa_cigar_t *bwa_aln_path2cigar(const path_t *path, int path_len, int *n_cigar);
 
 #ifdef __cplusplus
 }
 #endif
 
+/* Network-aware bwa helper functions */
 static inline void bam_init_pair( bam_pair_t *p )
 {
     memset(p, 0, sizeof(bam_pair_t));
@@ -221,6 +204,5 @@ static inline void bam_destroy_pair( bam_pair_t *p )
         }
     }
 }
-
 
 #endif

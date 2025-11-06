@@ -4,11 +4,6 @@
  * options, maybe even some more.
  */
 
-static const int chunksize = 0x100000;
-static const int loudness  = 0;
-static const int ring_size = 0x80000;
-static const int timeout   = 90;
-
 #include "bamlite.h"
 #include "bwtaln.h"
 #include "bwase.h"
@@ -32,10 +27,14 @@ static const int timeout   = 90;
 #include <stdarg.h>
 #include <zlib.h>
 
+KHASH_MAP_INIT_INT64(64, poslist_t)
+
+static const int chunksize = 0x100000;
+static const int loudness  = 0;
+static const int ring_size = 0x80000;
+static const int timeout   = 90;
 static const int the_hwm = 64;
 static const int the_linger = 2000;
-
-KHASH_MAP_INIT_INT64(64, poslist_t)
 
 struct option longopts[] = {
     { "num-diff",               1, 0, 'n' },
@@ -85,7 +84,7 @@ struct option workeropts[] = {
 // Yes, global variables.  Not very nice, but we'll only load one genome
 // and passing it everywhere gets old after a while.
 
-static bwt_t     *bwt[2]      = {0,0};
+static bwt_t     *bwt         = 0;
 static bntseq_t  *bns         = 0;
 static bntseq_t  *ntbns       = 0;
 static ubyte_t   *pac         = 0;
@@ -597,9 +596,9 @@ static int unique(bam_pair_t *p)
     if( skip_duplicates ) {
         switch (p->kind) {
             case eof_marker:  return 0;
-            case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
-            case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
-                                  && !(p->bam_rec[1].core.flag & SAM_FDP) ;
+            case singleton:   return !(p->bam_rec[0].core.flag & SAM_FPD) ;
+            case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FPD)
+                                  && !(p->bam_rec[1].core.flag & SAM_FPD) ;
         }
     }
     return 1;
@@ -613,7 +612,7 @@ static void aln_singleton( bam_pair_t *raw )
     if(raw->phase == pristine) {
         if(unique(raw)) {
             bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1, gap_opt->trim_qual);
-            bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[0], gap_opt);
+            bwa_cal_sa_reg_gap(0, bwt, 1, &raw->bwa_seq[0], gap_opt);
         }
         raw->phase = aligned ;
     }
@@ -621,7 +620,7 @@ static void aln_singleton( bam_pair_t *raw )
 
 static void posn_singleton( bam_pair_t *raw )
 {
-    int j ;
+    int j, strand ;
     if( raw->phase == aligned ) {
         if(unique(raw)) {
             // from bwa_sai2sam_se_core
@@ -629,11 +628,11 @@ static void posn_singleton( bam_pair_t *raw )
             bwa_aln2seq_core(p->n_aln, p->aln, p, 1, pe_opt->max_occ_se );
 
             // from bwa_cal_pac_pos
-            bwa_cal_pac_pos_core(bwt[0], bwt[1], p, gap_opt->max_diff, gap_opt->fnr);
+            bwa_cal_pac_pos_core(bns, bwt, p, gap_opt->max_diff, gap_opt->fnr);
             for (j = 0; j < p->n_multi; ++j) {
                 bwt_multi1_t *q = raw->bwa_seq[0].multi + j;
-                if (q->strand) q->pos = bwt_sa(bwt[0], q->pos);
-                else q->pos = bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p->len);
+                q->pos = bwa_sa2pos(bns, bwt, q->pos, p->len + q->ref_shift, &strand);
+                q->strand = strand;
             }
         }
         raw->phase = positioned ;
@@ -646,7 +645,7 @@ static void finish_singleton( bam_pair_t *raw )
         if(unique(raw)) {
             bwa_seq_t *p = &raw->bwa_seq[0] ;
             if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1, gap_opt->trim_qual);
-            bwa_refine_gapped(bns, 1, p, pac, ntbns);
+            bwa_refine_gapped(bns, 1, p, pac);
             bwa_update_bam1(&raw->bam_rec[0], bns, p, 0, gap_opt->mode, gap_opt->max_top2);
             bwa_free_read_seq1(p);
         }
@@ -673,7 +672,7 @@ static void aln_pair( bam_pair_t *raw )
                 // for.
                 // cnt_chg = bwa_cal_pac_pos_pe(seqs, &ii, &last_ii);
 
-                bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[j], gap_opt);
+                bwa_cal_sa_reg_gap(0, bwt, 1, &raw->bwa_seq[j], gap_opt);
             }
         }
         raw->phase = aligned ;
@@ -695,7 +694,7 @@ static void posn_pair( bam_pair_t *raw )
 
                 // Computes pos, seQ, mapQ.  need to store only those to avoid
                 // repeated computation!
-                bwa_cal_pac_pos_core(bwt[0], bwt[1], &raw->bwa_seq[j], gap_opt->max_diff, gap_opt->fnr);
+                bwa_cal_pac_pos_core(bns, bwt, &raw->bwa_seq[j], gap_opt->max_diff, gap_opt->fnr);
             }
         }
         raw->phase = positioned ;
@@ -726,7 +725,6 @@ static void finish_pair(
         if ((p[0]->type == BWA_TYPE_UNIQUE || p[0]->type == BWA_TYPE_REPEAT)
                 && (p[1]->type == BWA_TYPE_UNIQUE || p[1]->type == BWA_TYPE_REPEAT))
         { // only when both ends mapped
-            uint64_t x;
             int j, k;
             long long n_occ[2];
             for (j = 0; j < 2; ++j) {
@@ -748,19 +746,25 @@ static void finish_pair(
                                 poslist_t *z = &kh_val(my_hash, iter);
                                 z->n = r->l - r->k + 1;
                                 z->a = (bwtint_t*)malloc(sizeof(bwtint_t) * z->n);
-                                for (l = r->k; l <= r->l; ++l)
-                                    z->a[l - r->k] = r->a? bwt_sa(bwt[0], l) : bwt[1]->seq_len - (bwt_sa(bwt[1], l) + p[j]->len);
+                                for (l = r->k; l <= r->l; ++l) {
+                                    int strand;
+                                    z->a[l - r->k] = bwa_sa2pos(bns, bwt, l, p[j]->len, &strand)<<1;
+                                    z->a[l - r->k] |= strand;
+                                }
                             }
                             for (l = 0; l < kh_val(my_hash, iter).n; ++l) {
-                                x = kh_val(my_hash, iter).a[l];
-                                x = x<<32 | k<<1 | j;
-                                kv_push(uint64_t, d.arr, x);
+                                pair64_t px;
+                                px.x = kh_val(my_hash, iter).a[l]>>1;
+                                px.y = k<<2 | (kh_val(my_hash, iter).a[l]&1)<<1 | j;
+                                kv_push(pair64_t, d.arr, px);
                             }
                         } else { // then calculate on the fly
                             for (l = r->k; l <= r->l; ++l) {
-                                x = r->a? bwt_sa(bwt[0], l) : bwt[1]->seq_len - (bwt_sa(bwt[1], l) + p[j]->len);
-                                x = x<<32 | k<<1 | j;
-                                kv_push(uint64_t, d.arr, x);
+                                int strand;
+                                pair64_t px;
+                                px.x = bwa_sa2pos(bns, bwt, l, p[j]->len, &strand);
+                                px.y = k<<2 | strand<<1 | j;
+                                kv_push(pair64_t, d.arr, px);
                             }
                         }
                     }
@@ -782,8 +786,10 @@ static void finish_pair(
                     else
                         bwa_aln2seq_core(d.aln[j].n, d.aln[j].a, p[j], 0, pe_opt->n_multi);
                     for (k = 0; k < p[j]->n_multi; ++k) {
+                        int strand;
                         bwt_multi1_t *q = p[j]->multi + k;
-                        q->pos = q->strand? bwt_sa(bwt[0], q->pos) : bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p[j]->len);
+                        q->pos = bwa_sa2pos(bns, bwt, q->pos, p[j]->len + q->ref_shift, &strand);
+                        q->strand = strand;
                     }
                 }
             }
@@ -796,8 +802,8 @@ static void finish_pair(
         bwa_paired_sw1(bns, pac, p, pe_opt, ii, n_tot, n_mapped);
 
         // END from bwa_sai2sam_pe_core
-        bwa_refine_gapped(bns, 1, p[0], pac, ntbns);
-        bwa_refine_gapped(bns, 1, p[1], pac, ntbns);
+        bwa_refine_gapped(bns, 1, p[0], pac);
+        bwa_refine_gapped(bns, 1, p[1], pac);
 
         // For PE reads, stock BWA would have concatenated their
         // barcodes.  We don't, for once because we don't identify
@@ -851,20 +857,20 @@ void init_genome_index( const char* prefix, int touch )
     init_revcom1();
 
     fprintf(stderr, "[init_genome_index] loading index... ");
-    strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,touch);
-    strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,touch);
-    strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0],touch);
-    strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1],touch);
+    strcpy(str, prefix); strcat(str, ".bwt");  bwt = bwt_restore_bwt(str);
+    strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt);
     free(str);
 
     // if (!(gap_opt.mode & BWA_MODE_COMPREAD)) {  // in color space; initialize ntpac
     //	pe_opt->type = BWA_PET_SOLID;
     //	ntbns = bwa_open_nt(prefix);
-    // }	
-    pac = bwt_restore_pac( bns,touch ) ;
+    // }
+    pac = (ubyte_t*)calloc(bns->l_pac/4+1, 1);
+    err_rewind(bns->fp_pac);
+    err_fread_noeof(pac, 1, bns->l_pac/4+1, bns->fp_pac);
     gettimeofday( &tv1, 0 ) ;
     fprintf(stderr, "%.2f sec\n", tdiff(&tv, &tv1));
-    genome_length = bwt[0]->seq_len ;
+    genome_length = bwt->seq_len ;
 }
 
 void init_genome_params( const char* prefix ) 
@@ -873,7 +879,7 @@ void init_genome_params( const char* prefix )
     char *fn = alloca(strlen(prefix) + 10);
     strcpy(fn, prefix); strcat(fn, ".bwt");
     FILE *fp = xopen(fn, "rb");
-	err_fread(foo, sizeof(bwtint_t), 5, fp);
+	fread(foo, sizeof(bwtint_t), 5, fp);
     genome_length = foo[4] ;
     fclose(fp) ;
 }
@@ -938,6 +944,12 @@ inline void put_long( unsigned char **p, uint64_t x )
     put_int( p, x >> 32 & 0xffffffff ) ;
 }
 
+inline void put_bwtint( unsigned char **p, bwtint_t x )
+{
+    put_int( p, x >>  0 & 0xffffffff ) ;
+    put_int( p, x >> 32 & 0xffffffff ) ;
+}
+
 inline void put_block( unsigned char **p, void *q, size_t s )
 {
     memcpy( *p, q, s ) ;
@@ -957,7 +969,7 @@ void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
         switch( p->phase ) {
             case pristine: break ;
             case finished: break ;
-            case positioned: len += 38 + p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ;
+            case positioned: len += 46 + p->bwa_seq[i].n_multi * 12 ;  // 8 bytes pos + 4 bytes bitfields
                              // fallthrough!
             case aligned: len += 8 + p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ;
                           break ;
@@ -989,16 +1001,37 @@ void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
                              put_int( &q, p->bwa_seq[i].len ) ;
                              put_int( &q, p->bwa_seq[i].clip_len ) ;
                              put_int( &q, p->bwa_seq[i].score ) ;
-                             put_int( &q, p->bwa_seq[i].sa ) ;
+                             put_bwtint( &q, p->bwa_seq[i].sa ) ;
                              put_int( &q, p->bwa_seq[i].c1 ) ;
                              put_int( &q, p->bwa_seq[i].c2 ) ;
-                             put_int( &q, p->bwa_seq[i].pos ) ;
+                             put_bwtint( &q, p->bwa_seq[i].pos ) ;
                              put_int( &q, p->bwa_seq[i].n_multi ) ;
-                             put_block( &q, p->bwa_seq[i].multi, p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ) ;
+                             // Serialize bwt_multi1_t array field-by-field for 64-bit compatibility
+                             {
+                                 int j;
+                                 for (j = 0; j < p->bwa_seq[i].n_multi; ++j) {
+                                     bwt_multi1_t *m = &p->bwa_seq[i].multi[j];
+                                     uint32_t bitfields = (m->n_cigar) | (m->gap << 15) | (m->mm << 23) | (m->strand << 31);
+                                     put_bwtint( &q, m->pos );
+                                     put_int( &q, bitfields );
+                                     // Note: cigar pointer is not serialized
+                                 }
+                             }
                              // fallthrough!
             case aligned:    put_int(   &q, p->bwa_seq[i].max_entries ) ;
                              put_int(   &q, p->bwa_seq[i].n_aln ) ;
-                             put_block( &q, p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             // Serialize bwt_aln1_t array field-by-field for 64-bit compatibility
+                             {
+                                 int j;
+                                 for (j = 0; j < p->bwa_seq[i].n_aln; ++j) {
+                                     bwt_aln1_t *a = &p->bwa_seq[i].aln[j];
+                                     // New bwt_aln1_t has uint64_t bitfield with n_mm, n_gapo, n_gape, score, n_ins, n_del
+                                     put_long( &q, *(uint64_t*)a );
+                                     put_bwtint( &q, a->k );
+                                     put_bwtint( &q, a->l );
+                                     // score is now in the bitfield, not a separate field
+                                 }
+                             }
                              break ;
         }
     }
@@ -1027,6 +1060,13 @@ inline uint64_t get_long( unsigned char **p )
 {
     uint64_t x = get_uint( p ) ;
     uint64_t y = get_uint( p ) ;
+    return y << 32 | x ;
+}
+
+inline bwtint_t get_bwtint( unsigned char **p )
+{
+    bwtint_t x = get_uint( p ) ;
+    bwtint_t y = get_uint( p ) ;
     return y << 32 | x ;
 }
 
@@ -1066,18 +1106,43 @@ void pair_init_from_msg(bam_pair_t *p, zmq_msg_t *m)
                              p->bwa_seq[i].len    = get_int( &q ) ;
                              p->bwa_seq[i].clip_len=get_int( &q ) ;
                              p->bwa_seq[i].score  = get_int( &q ) ;
-                             p->bwa_seq[i].sa     = get_int( &q ) ;
+                             p->bwa_seq[i].sa     = get_bwtint( &q ) ;
                              p->bwa_seq[i].c1     = get_int( &q ) ;
                              p->bwa_seq[i].c2     = get_int( &q ) ;
-                             p->bwa_seq[i].pos    = get_int( &q ) ;
+                             p->bwa_seq[i].pos    = get_bwtint( &q ) ;
                              p->bwa_seq[i].n_multi= get_int( &q ) ;
                              p->bwa_seq[i].multi  = malloc( p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ) ;
-                             get_block( &q, p->bwa_seq[i].multi, p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ) ;
+                             // Deserialize bwt_multi1_t array field-by-field for 64-bit compatibility
+                             {
+                                 int j;
+                                 for (j = 0; j < p->bwa_seq[i].n_multi; ++j) {
+                                     bwt_multi1_t *m = &p->bwa_seq[i].multi[j];
+                                     uint32_t bitfields;
+                                     m->pos = get_bwtint( &q );
+                                     bitfields = get_int( &q );
+                                     m->n_cigar = bitfields & 0x7FFF;
+                                     m->gap = (bitfields >> 15) & 0xFF;
+                                     m->mm = (bitfields >> 23) & 0xFF;
+                                     m->strand = (bitfields >> 31) & 0x1;
+                                     m->cigar = NULL;  // Pointer not serialized
+                                 }
+                             }
                              // fallthrough!
             case aligned:    p->bwa_seq[i].max_entries = get_int( &q ) ;
                              p->bwa_seq[i].n_aln       = get_int( &q ) ;
                              p->bwa_seq[i].aln         = malloc( p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
-                             get_block( &q,  p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             // Deserialize bwt_aln1_t array field-by-field for 64-bit compatibility
+                             {
+                                 int j;
+                                 for (j = 0; j < p->bwa_seq[i].n_aln; ++j) {
+                                     bwt_aln1_t *a = &p->bwa_seq[i].aln[j];
+                                     // New bwt_aln1_t has uint64_t bitfield with n_mm, n_gapo, n_gape, score, n_ins, n_del
+                                     *(uint64_t*)a = get_long( &q );
+                                     a->k = get_bwtint( &q );
+                                     a->l = get_bwtint( &q );
+                                     // score is now in the bitfield, not a separate field
+                                 }
+                             }
                              break ;
         }
     }
@@ -1923,11 +1988,10 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
     }
 
     unlink( tmpname ) ;
-	if (pac)    bwt_destroy_pac(pac,bns);
+	if (pac)    free(pac);
 	if (ntbns)  bns_destroy(ntbns);
 	if (bns)    bns_destroy(bns);
-	if (bwt[0]) bwt_destroy(bwt[0]);
-    if (bwt[1]) bwt_destroy(bwt[1]);
+	if (bwt)    bwt_destroy(bwt);
 
 	for (iter = kh_begin(iinfos); iter != kh_end(iinfos); ++iter)
     {
@@ -2203,11 +2267,10 @@ void bwa_worker_core( int nthreads, char* host, int port )
     // we free it.
     zmq_term(zmq_context);
 
-    if (pac) bwt_destroy_pac(pac,bns);
+    if (pac) free(pac);
     if (ntbns) bns_destroy(ntbns);
     if (bns) bns_destroy(bns);
-    if (bwt[0]) bwt_destroy(bwt[0]);
-    if (bwt[1]) bwt_destroy(bwt[1]);
+    if (bwt) bwt_destroy(bwt);
 }
 
 int bwa_worker( int argc, char *argv[] )

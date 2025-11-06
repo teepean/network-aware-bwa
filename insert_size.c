@@ -206,6 +206,8 @@ khash_t(isize_infos) *decode_iinfo( char *p, char *q )
 
         khiter_t it = kh_put(isize_infos, iinfos, k, &ret) ;
         memcpy( &kh_value(iinfos, it), p, sizeof(isize_info_t) ) ;
+        // hist pointer is not valid after deserialization, set to NULL
+        kh_value(iinfos, it).hist = NULL;
         p += sizeof(isize_info_t) ;
         xassert( p <= q, "error when decoding isize info" ) ;
     }
