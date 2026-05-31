@@ -11,6 +11,62 @@ more versatile, more accurate and produces better base-level alignment.
 [minimap2]: https://github.com/lh3/minimap2
 [bwa-mem2]: https://github.com/bwa-mem2/bwa-mem2
 
+## Network-aware fork: `bam2bam` and `fastq2bam`
+
+This fork adds a **distributed BWA-backtrack** (`aln` + `samse`/`sampe`) workflow built
+on [ZeroMQ][zmq], plus a single-step FASTQ entry point. A *master* process reads the
+input and streams reads to *worker* processes — local threads and/or remote machines —
+which align them and stream the results back. It was developed for ancient-DNA mapping
+(short, damaged reads), where BWA-backtrack with `-l 1024 -n 0.01 -o 2` is the
+appropriate aligner.
+
+### Subcommands
+
+- **`bwa bam2bam`** — align reads from an unaligned BAM and write an aligned BAM
+  (combines `aln` + `samse`/`sampe` in one pass).
+- **`bwa fastq2bam`** — the same engine, but reads a single-end **FASTQ/FASTA** file
+  (each read is wrapped in an unmapped record internally). *Single-end only.*
+- **`bwa worker`** — a worker that connects to a master and aligns on its behalf.
+
+### Local use (threads only)
+
+	bwa index ref.fa
+	bwa fastq2bam -g ref.fa -l 1024 -n 0.01 -o 2 -t 16 -f out.bam reads.fq.gz
+
+`-t N` uses N local threads; with no `-p`, no network is used.
+
+### Distributed use (master + workers)
+
+Master — binds ports `PORT` (config), `PORT+1` (work) and `PORT+2` (broadcast); here it
+also contributes 16 local threads:
+
+	bwa fastq2bam -g ref.fa -l 1024 -n 0.01 -o 2 -t 16 -p 5555 -f out.bam reads.fq.gz
+
+Worker — on the same or another machine:
+
+	bwa worker -h <master-host> -p 5555 -t <N>
+
+The master sends the worker the alignment parameters **and its own genome-prefix
+string**, and the worker loads that index from its *local* filesystem. If the worker
+doesn't have the index at the same path (e.g. a different OS/mount), use **`-g`** to
+point it at a local copy — the parameters still come from the master, so results are
+unchanged:
+
+	bwa worker -g /local/path/ref.fa -h <master-host> -p 5555 -t <N>
+
+Each worker needs the BWA index files (`.amb .ann .bwt .pac .sa`) on its local disk. To
+copy them to another machine over [Tailscale][tailscale]:
+
+	sudo tailscale set --operator=$USER     # one-time, lets tailscale run without sudo
+	tailscale file cp ref.fa.amb ref.fa.ann ref.fa.bwt ref.fa.pac ref.fa.sa <peer>:
+	#  then on the peer:  tailscale file get <dir>
+
+See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for build details — ZeroMQ is
+required, and on macOS you must pass Homebrew's include/lib paths to `make`.
+
+[zmq]: https://zeromq.org
+[tailscale]: https://tailscale.com
+
 ## Getting started
 
 	git clone https://github.com/lh3/bwa.git

@@ -5,6 +5,7 @@ This is a port of the network-aware BWA features from version 0.5.10 to BWA 0.7.
 ## Features
 
 - **bam2bam command**: Direct BAM-to-BAM alignment workflow
+- **fastq2bam command**: Single-end FASTQ/FASTA-to-BAM alignment (same engine as bam2bam)
 - **Network distribution**: ZeroMQ-based distributed alignment across compute nodes
 - **Ancient DNA optimized**: Improved settings for aDNA analysis
 - **Single-end and paired-end support**: Handles both read types automatically
@@ -52,6 +53,18 @@ make clean
 make NETWORK=1 CFLAGS="-g -Wall -O2 $(pkg-config --cflags libzmq)" LIBS="-lm -lz -lpthread $(pkg-config --libs libzmq)"
 ```
 
+### macOS (Homebrew)
+
+ZeroMQ is always linked, so install it and point `make` at Homebrew's paths:
+
+```bash
+brew install zeromq
+make clean
+make INCLUDES="-I$(brew --prefix)/include" LDFLAGS="-L$(brew --prefix)/lib"
+```
+
+(`-lrt` is automatically omitted on non-Linux, so no other changes are needed.)
+
 ## Installation
 
 ```bash
@@ -87,9 +100,16 @@ samtools import -@ 4 -0 reads.fq -o unpaired.bam
 ./bwa bam2bam -g reference.fasta -f aligned.bam unpaired.bam
 ```
 
+### Test fastq2bam with single-end data:
+```bash
+# No BAM conversion needed -- align straight from FASTQ/FASTA
+./bwa fastq2bam -g reference.fasta -f aligned.bam reads.fq.gz
+```
+
 ### Ancient DNA settings:
 ```bash
-./bwa bam2bam -g reference.fasta -n 0.01 -o 2 -l 16500 -f aligned.bam unaligned.bam
+./bwa bam2bam   -g reference.fasta -n 0.01 -o 2 -l 1024 -t 16 -f aligned.bam unaligned.bam
+./bwa fastq2bam -g reference.fasta -n 0.01 -o 2 -l 1024 -t 16 -f aligned.bam reads.fq.gz
 ```
 
 ## Usage
@@ -117,16 +137,50 @@ Options:
   --broken-input                    handle BAM with mismatched pairs
 ```
 
-### Network Distribution (if built with NETWORK=1)
+### fastq2bam Command
 
-**On master node:**
 ```bash
-./bwa bam2bam -g reference.fasta -p 5555 -f aligned.bam unaligned.bam
+bwa fastq2bam [options] <in.fastq>     # single-end FASTQ/FASTA (use '-' for stdin)
 ```
 
-**On worker nodes:**
+Accepts the same alignment options as `bam2bam` (`-g -f -n -o -e -l -k -t -p ...`).
+Paired-end is not supported; the BAM-pairing options (`-0/-1/-2`, `--broken-input`)
+do not apply.
+
+### Network Distribution
+
+Add `-p PORT` to the master to accept remote workers. The master binds three ports:
+`PORT` (config), `PORT+1` (work) and `PORT+2` (insert-size broadcast) -- open all three
+in any firewall.
+
+**On the master node** (also using 16 local threads here):
 ```bash
-./bwa bam2bam -g reference.fasta tcp://master-host:5555
+./bwa fastq2bam -g reference.fasta -l 1024 -n 0.01 -o 2 -t 16 -p 5555 -f aligned.bam reads.fq.gz
+# (bam2bam works the same way with an unaligned BAM as input)
+```
+
+**On each worker node:**
+```bash
+./bwa worker -h <master-host> -p 5555 -t <N>
+```
+
+The master sends the worker the alignment parameters **and its own genome-prefix
+path**, which the worker loads from its *local* filesystem. If the worker doesn't have
+the index at that path (e.g. a different OS/mount), use `-g` to load a local copy --
+parameters still come from the master, so results are identical:
+
+```bash
+./bwa worker -g /local/path/reference.fasta -h <master-host> -p 5555 -t <N>
+```
+
+Each worker needs the index files (`.amb .ann .bwt .pac .sa`) locally. To copy them to
+another machine over Tailscale:
+
+```bash
+sudo tailscale set --operator=$USER      # one-time, so tailscale runs without sudo
+tailscale file cp reference.fasta.amb reference.fasta.ann reference.fasta.bwt \
+                  reference.fasta.pac reference.fasta.sa <peer-name>:
+# then on the peer:  tailscale file get <dir>
 ```
 
 ## Key Improvements Over 0.5.10
@@ -150,6 +204,10 @@ For single-end data, ensure reads have unpaired flags (flag 4 for unmapped, not 
 ## Changes from Original BWA 0.7.19
 
 - Added `bam2bam.c` - Main bam2bam implementation
+- Added `fastq2bam` subcommand - single-end FASTQ/FASTA input into the bam2bam engine
+  (`read_fastq_single` in `bwaseqio.c`)
+- Added `bwa worker -g/--genome` - load the index from a local path instead of the
+  master-supplied one (for workers on a different host/mount)
 - Added `insert_size.c` - Insert size distribution tracking
 - Added `bgzf.c/h` - BGZF compression support
 - Added `bwape.h` - Paired-end header definitions
