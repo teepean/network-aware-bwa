@@ -18,6 +18,7 @@ extern "C" {
 	int bwa_index(int argc, char *argv[]);
 	int bwa_aln(int argc, char *argv[]);
     int bwa_bam_to_bam(int argc, char *argv[], char* vn);
+    int bwa_fastq_to_bam(int argc, char *argv[], char* vn);
     int bwa_worker(int argc, char *argv[]);
 	int bwt_bwtgen_main(int argc, char *argv[]);
 

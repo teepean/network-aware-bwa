@@ -497,3 +497,68 @@ int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken, int ignor
         erase_unwanted_tags( &pair->bam_rec[i] ) ;
     return r ;
 }
+
+/* Read one single-end read from a fastq/fasta file and wrap it in an
+ * unmapped bam record, so the rest of the bam2bam machinery can treat
+ * it exactly like input that came from a BAM file.  Returns 1 for a
+ * read, 0 at EOF, -1 on a truncated/garbled record.
+ */
+int read_fastq_single(bwa_seqio_t *bs, bam_pair_t *pair)
+{
+    // map nst_nt4 codes (A,C,G,T,other -> 0,1,2,3,4) to the 4-bit
+    // nibble codes used in a bam record (A=1,C=2,G=4,T=8,N=15).
+    static const unsigned char nt4_to_nt16[5] = { 1, 2, 4, 8, 15 } ;
+    kseq_t *seq = bs->ks ;
+    int i, l, r, l_qname, l_seqpacked ;
+    bam1_t *b ;
+    uint8_t *s, *q ;
+
+    memset(pair, 0, sizeof(bam_pair_t)) ;
+    r = kseq_read(seq) ;
+    if( r == -1 ) return 0 ;        // EOF
+    if( r <  0 ) return -1 ;        // truncated quality string
+
+    b = &pair->bam_rec[0] ;
+    l = seq->seq.l ;
+
+    l_qname = seq->name.l + 1 ;
+    if( l_qname > 255 ) l_qname = 255 ;     // core.l_qname is only 8 bits
+    l_seqpacked = (l + 1) / 2 ;
+
+    b->core.l_qname = l_qname ;
+    b->core.flag    = BAM_FUNMAP ;
+    b->core.l_qseq  = l ;
+    b->core.tid     = b->core.mtid = -1 ;
+    b->core.pos     = b->core.mpos = -1 ;
+    b->core.bin     = 0 ;
+    b->core.qual    = 0 ;
+    b->core.n_cigar = 0 ;
+    b->core.isize   = 0 ;
+
+    b->data_len = l_qname + l_seqpacked + l ;
+    b->m_data   = b->data_len ;
+    b->l_aux    = 0 ;
+    b->data     = (uint8_t*)calloc( b->data_len, 1 ) ;
+
+    // query name (NUL-terminated, possibly truncated)
+    memcpy( b->data, seq->name.s, l_qname-1 ) ;
+    b->data[l_qname-1] = 0 ;
+
+    // packed sequence: 4 bits per base, high nibble first
+    s = bam1_seq(b) ;
+    for( i = 0 ; i != l ; ++i ) {
+        uint8_t code = nt4_to_nt16[ nst_nt4_table[(int)seq->seq.s[i]] ] ;
+        s[i>>1] |= code << (4 * (1 - (i&1))) ;
+    }
+
+    // qualities: stored raw (bam1_to_seq adds 33 back); 0xff if absent
+    q = bam1_qual(b) ;
+    if( seq->qual.l == (size_t)l )
+        for( i = 0 ; i != l ; ++i ) q[i] = seq->qual.s[i] - 33 ;
+    else
+        for( i = 0 ; i != l ; ++i ) q[i] = 0xff ;
+
+    pair->kind  = singleton ;
+    pair->phase = pristine ;
+    return 1 ;
+}

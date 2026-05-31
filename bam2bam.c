@@ -98,6 +98,7 @@ static int       broken_input = 0;
 static int       drop_aligned = 0;
 static int       max_run_time = 90;
 static int    skip_duplicates = 0;
+static int       fastq_input = 0;   // read FASTQ/FASTA instead of BAM (fastq2bam)
 
 static void      *zmq_context = 0;
 static int       listen_port  = 0;
@@ -1205,6 +1206,15 @@ hell:
 // and no listening port is requested.  Doesn't require 0MQ.  As opposed
 // to "classic" BWA, we stop that blockwise nonsense and get exactly one
 // singleton or pair per iteration.
+// Pull the next record from the input, dispatching to the bam reader or
+// the (single-end) fastq reader depending on how we were invoked.
+static int read_input_pair( bwa_seqio_t *bs, bam_pair_t *pair )
+{
+    return fastq_input
+        ? read_fastq_single( bs, pair )
+        : read_bam_pair( bs, pair, broken_input, drop_aligned ) ;
+}
+
 void sequential_loop_pass1( bwa_seqio_t *ks, gzFile temporary, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
@@ -1213,9 +1223,9 @@ void sequential_loop_pass1( bwa_seqio_t *ks, gzFile temporary, khash_t(isize_inf
     int tot_seqs = 0, rc=0 ;
     bam_pair_t raw ;
     for(;;) {
-        rc=read_bam_pair(ks, &raw, broken_input, drop_aligned);
+        rc=read_input_pair(ks, &raw);
         if(rc<0) {
-            fprintf(stderr, "[%s] error reading input BAM%s\n",
+            fprintf(stderr, "[%s] error reading input%s\n",
                     __FUNCTION__, rc==-2 ? " (lone mate)" : "" ) ;
             exit(1);
         }
@@ -1368,7 +1378,7 @@ void *run_reader_thread( void* vargs )
     zmq_msg_t msg;
     bam_init_pair(&raw);
     while (!s_interrupted) {
-        if( args->ks ) rc=read_bam_pair(args->ks, &raw, broken_input, drop_aligned);
+        if( args->ks ) rc=read_input_pair(args->ks, &raw);
         else rc=read_pair_custom(args->gzf, &raw);
 
         if(!rc) break ;
@@ -2134,6 +2144,130 @@ int bwa_bam_to_bam( int argc, char *argv[], char* version )
 
     bgzf_close( output );
     if( !s_interrupted ) final_rename( "bam2bam", ofile ) ;
+
+	free(pe_opt);
+	free(gap_opt);
+	return s_interrupted ;
+}
+
+/* Single-end fastq2bam: same engine as bam2bam, but the input is a
+ * FASTQ/FASTA file of unaligned reads instead of a BAM.  Each read is
+ * wrapped in an unmapped bam record (see read_fastq_single) and then
+ * handed to the very same (optionally network-distributed) pipeline.
+ */
+int bwa_fastq_to_bam( int argc, char *argv[], char* version )
+{
+	int c, opte = -1;
+    char *ofile = 0;
+    char *tmpname = "/var/tmp" ;
+    char *prefix = 0;
+
+	gap_opt = gap_init_opt();
+	pe_opt = bwa_init_pe_opt();
+
+	while ((c = getopt_long(argc, argv, "g:n:o:e:i:d:l:k:LR:m:t:NM:O:E:q:f:C:D:a:sc:h:H:Ap:", longopts, 0)) >= 0) {
+		switch (c) {
+        case 'g': prefix = optarg; break;
+		case 'n':
+			if (strstr(optarg, ".")) gap_opt->fnr = atof(optarg), gap_opt->max_diff = -1;
+			else gap_opt->max_diff = atoi(optarg), gap_opt->fnr = -1.0;
+			break;
+		case 'o': gap_opt->max_gapo = atoi(optarg); break;
+		case 'e': opte = atoi(optarg); break;
+		case 'M': gap_opt->s_mm = atoi(optarg); break;
+		case 'O': gap_opt->s_gapo = atoi(optarg); break;
+		case 'E': gap_opt->s_gape = atoi(optarg); break;
+		case 'd': gap_opt->max_del_occ = atoi(optarg); break;
+		case 'i': gap_opt->indel_end_skip = atoi(optarg); break;
+		case 'l': gap_opt->seed_len = atoi(optarg); break;
+		case 'k': gap_opt->max_seed_diff = atoi(optarg); break;
+		case 'm': gap_opt->max_entries = atoi(optarg); break;
+		case 't': gap_opt->n_threads = atoi(optarg); break;
+		case 'L': gap_opt->mode |= BWA_MODE_LOGGAP; break;
+		case 'R': gap_opt->max_top2 = atoi(optarg); break;
+		case 'q': gap_opt->trim_qual = atoi(optarg); break;
+		case 'N': gap_opt->mode |= BWA_MODE_NONSTOP; gap_opt->max_top2 = 0x7fffffff; break;
+		case 'f': ofile = optarg; break;
+		case 'C': pe_opt->max_occ = atoi(optarg); break;
+		case 'D': pe_opt->max_occ_se = atoi(optarg); break;
+		case 'a': pe_opt->max_isize = atoi(optarg); break;
+		case 's': pe_opt->is_sw = 0; break;
+		case 'c': pe_opt->ap_prior = atof(optarg); break;
+		case 'A': pe_opt->force_isize = 1; break;
+		case 'h': pe_opt->n_multi = atoi(optarg); break;
+		case 'H': pe_opt->N_multi = atoi(optarg); break;
+		case 'p': listen_port = atoi(optarg); break;
+        case 128: only_aligned = 1; break;
+        case 129: debug_bam = 1; break;
+        case 132: tmpname = *optarg ? optarg : "." ; break ;
+		default: return 1;
+		}
+	}
+	if (opte > 0) {
+		gap_opt->max_gape = opte;
+		gap_opt->mode &= ~BWA_MODE_GAPE;
+	}
+
+	if (optind + 1 > argc || !prefix) {
+		fprintf(stderr, "\n");
+		fprintf(stderr, "Usage:   bwa fastq2bam [options] <in.fastq>\n\n");
+		fprintf(stderr, "Aligns single-end reads from a FASTQ/FASTA file (use '-' for stdin) and\n");
+		fprintf(stderr, "writes BAM, using the same (optionally network-distributed) engine as bam2bam.\n\n");
+		fprintf(stderr, "Options: -g, --genome PREFIX               prefix of genome index files [%s]\n", prefix);
+        fprintf(stderr, "         -f, --output FILE                 file to write output to instead of stdout\n");
+        fprintf(stderr, "\n");
+		fprintf(stderr, "         -n, --num-diff NUM                max #diff (int) or missing prob under %.2f err rate (float) [%.2f]\n", BWA_AVG_ERR, gap_opt->fnr);
+		fprintf(stderr, "         -o, --max-gap-open INT            maximum number or fraction of gap opens [%d]\n", gap_opt->max_gapo);
+		fprintf(stderr, "         -e, --max-gap-extensions INT      maximum number of gap extensions, -1 for disabling long gaps [-1]\n");
+		fprintf(stderr, "         -i, --indel-near-end INT          do not put an indel within INT bp towards the ends [%d]\n", gap_opt->indel_end_skip);
+		fprintf(stderr, "         -d, --deletion-occurences INT     maximum occurrences for extending a long deletion [%d]\n", gap_opt->max_del_occ);
+		fprintf(stderr, "         -l, --seed-length INT             seed length [%d]\n", gap_opt->seed_len);
+		fprintf(stderr, "         -k, --seed-mismatches INT         maximum differences in the seed [%d]\n", gap_opt->max_seed_diff);
+		fprintf(stderr, "         -M, --mismatch-penalty INT        mismatch penalty [%d]\n", gap_opt->s_mm);
+		fprintf(stderr, "         -O, --gap-open-penalty INT        gap open penalty [%d]\n", gap_opt->s_gapo);
+		fprintf(stderr, "         -E, --gap-extension-penalty INT   gap extension penalty [%d]\n", gap_opt->s_gape);
+        fprintf(stderr, "\n");
+		fprintf(stderr, "         -m, --queue-size INT              maximum entries in the queue [%d]\n", gap_opt->max_entries);
+		fprintf(stderr, "         -R, --max-best-hits INT           stop searching when there are >INT equally best hits [%d]\n", gap_opt->max_top2);
+		fprintf(stderr, "         -q, --trim-quality INT            quality threshold for read trimming down to %dbp [%d]\n", BWA_MIN_RDLEN, gap_opt->trim_qual);
+		fprintf(stderr, "         -L, --log-gap-penalty             log-scaled gap penalty for long deletions\n");
+		fprintf(stderr, "         -N, --non-iterative               non-iterative mode: search for all n-difference hits (slooow)\n");
+		fprintf(stderr, "         -D, --max-occurences-se INT       maximum occurrences for a single ended read [%d]\n", pe_opt->max_occ_se);
+		fprintf(stderr, "         -h, --max-hits INT                maximum hits to output [%d]\n", pe_opt->n_multi);
+        fprintf(stderr, "             --only-aligned                output only aligned reads\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "         -p, --listen-port PORT            listen for workers on PORT [%d]\n", listen_port);
+		fprintf(stderr, "         -t, --num-threads INT             number of threads [%d]\n", gap_opt->n_threads);
+        fprintf(stderr, "             --temp-dir                    location of intermediate file [%s]\n", tmpname);
+		fprintf(stderr, "\n");
+        if( !prefix )
+            fprintf(stderr, "No genome prefix specified.\n\n");
+		return 1;
+	}
+	if (gap_opt->fnr > 0.0) {
+		int i, k;
+		for (i = 17, k = 0; i <= 250; ++i) {
+			int l = bwa_cal_maxdiff(i, BWA_AVG_ERR, gap_opt->fnr);
+			if (l != k) fprintf(stderr, "[bwa_aln] %dbp reads: max_diff = %d\n", i, l);
+			k = l;
+		}
+	}
+
+    fastq_input = 1 ;
+	bwa_seqio_t *ks = bwa_seq_open(argv[optind]);
+    bns = bns_restore(prefix);
+
+    BGZF* output = ofile ? bgzf_open(ofile, "w2") : bgzf_fdopen(1, "w2") ;
+    if( 0>bwa_print_bam_header(output, bns, "", argc, argv, version) ) {
+        fprintf( stderr, "[bwa_fastq2bam] Error writing BAM header.\n" ) ;
+        exit(1);
+    }
+
+    bwa_bam2bam_core(prefix, tmpname, ks, output);
+	bwa_seq_close(ks);
+
+    bgzf_close( output );
+    if( !s_interrupted ) final_rename( "fastq2bam", ofile ) ;
 
 	free(pe_opt);
 	free(gap_opt);

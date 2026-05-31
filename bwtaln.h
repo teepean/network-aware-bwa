@@ -169,6 +169,7 @@ extern "C" {
 
 	/* Network-aware bwa functions */
 	int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken, int ignore_aligned);
+	int read_fastq_single(bwa_seqio_t *bs, bam_pair_t *pair);
 	void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp, int trim_qual);
 	void bwa_free_read_seq1(bwa_seq_t *p);
 

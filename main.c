@@ -54,6 +54,7 @@ int main_pemerge(int argc, char *argv[]);
 int main_maxk(int argc, char *argv[]);
 
 int bwa_bam_to_bam(int argc, char *argv[], char* version);
+int bwa_fastq_to_bam(int argc, char *argv[], char* version);
 int bwa_worker(int argc, char *argv[]);
 
 static int usage()
@@ -73,6 +74,7 @@ static int usage()
 	fprintf(stderr, "         bwasw         BWA-SW for long queries (DEPRECATED)\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "         bam2bam       aln/samse/sampe all in one\n");
+	fprintf(stderr, "         fastq2bam     align single-end FASTQ to BAM (bam2bam engine)\n");
 	fprintf(stderr, "         worker        run worker process for bam2bam\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "         shm           manage indices in shared memory\n");
@@ -119,6 +121,7 @@ int main(int argc, char *argv[])
 	else if (strcmp(argv[1], "pemerge") == 0) ret = main_pemerge(argc-1, argv+1);
 	else if (strcmp(argv[1], "maxk") == 0) ret = main_maxk(argc-1, argv+1);
 	else if (strcmp(argv[1], "bam2bam") == 0) ret = bwa_bam_to_bam(argc-1, argv+1, PACKAGE_VERSION);
+	else if (strcmp(argv[1], "fastq2bam") == 0) ret = bwa_fastq_to_bam(argc-1, argv+1, PACKAGE_VERSION);
 	else if (strcmp(argv[1], "worker") == 0) ret = bwa_worker(argc-1, argv+1);
 	else {
 		fprintf(stderr, "[main] unrecognized command '%s'\n", argv[1]);
