@@ -15,7 +15,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <malloc.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <sys/time.h>
