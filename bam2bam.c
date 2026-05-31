@@ -77,6 +77,7 @@ struct option workeropts[] = {
     { "host",                   1, 0, 'h' },
     { "port",                   1, 0, 'p' },
     { "timeout",                1, 0, 'T' },
+    { "genome",                 1, 0, 'g' },
     { 0,0,0,0 }
 } ;
 
@@ -2411,13 +2412,15 @@ int bwa_worker( int argc, char *argv[] )
     int c, nthreads = 1, port = 0 ;
     char *host = "localhost" ;
     char *prefix = 0;
+    char *local_prefix = 0;     // -g: load index from here, ignore master's path
 
-	while ((c = getopt_long(argc, argv, "t:h:p:T:", workeropts, 0)) >= 0) {
+	while ((c = getopt_long(argc, argv, "t:h:p:T:g:", workeropts, 0)) >= 0) {
 		switch (c) {
             case 't': nthreads = atoi(optarg) ; break ;
             case 'h': host = optarg ; break ;
             case 'p': port = atoi(optarg) ; break ;
             case 'T': max_run_time = atoi(optarg) ; break ;
+            case 'g': local_prefix = optarg ; break ;
             default: return 1;
         }
     }
@@ -2436,6 +2439,8 @@ int bwa_worker( int argc, char *argv[] )
 		fprintf(stderr, "Options: -t, --num-threads NUM             number of worker threads [%d]\n", nthreads);
         fprintf(stderr, "         -h, --host HOST                   host to connect to [%s]\n", host);
         fprintf(stderr, "         -p, --port NUM                    port to connect to [%d]\n", port);
+        fprintf(stderr, "         -g, --genome PREFIX               load index from this local path instead\n");
+        fprintf(stderr, "                                           of the master's path (params still come from master)\n");
         fprintf(stderr, "         -T, --timeout NUM                 terminate after NUM minutes [%d]\n", max_run_time);
         return 1;
     }
@@ -2468,6 +2473,18 @@ int bwa_worker( int argc, char *argv[] )
     prefix = strndup( zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t),
                       zmq_msg_size(&m) - sizeof(gap_opt_t) - sizeof(pe_opt_t) ) ;
     zmq_msg_close(&m);
+
+    // The master sends *its* genome prefix, which is a path on the master's
+    // filesystem.  If the same path doesn't exist here (e.g. a different OS
+    // or mount layout), -g lets us load an equivalent local index instead.
+    // Alignment parameters still come from the master, so results are
+    // unaffected -- only the file location changes.
+    if( local_prefix ) {
+        fprintf( stderr, "[bwa_worker] overriding master genome path '%s' with local '%s'.\n",
+                 prefix, local_prefix ) ;
+        free(prefix) ;
+        prefix = strdup(local_prefix) ;
+    }
 
     // Initialize genome index.  This is basically an mmap, but since
     // the data is read lazily, startup is slow afterwards.  Therefore,
