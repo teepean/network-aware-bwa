@@ -11,9 +11,18 @@ AOBJS=		bwashm.o bwase.o bwaseqio.o bwtgap.o bwtaln.o bamlite.o \
 			bwtsw2_core.o bwtsw2_main.o bwtsw2_aux.o bwt_lite.o \
 			bwtsw2_chain.o fastmap.o bwtsw2_pair.o bam2bam.o bgzf.o insert_size.o
 PROG=		bwa
-INCLUDES=	
+INCLUDES=
 LIBS=		-lm -lz -lpthread -lzmq
 SUBDIRS=	.
+
+# On macOS, pick up Homebrew-installed headers/libs (e.g. zeromq)
+ifeq ($(shell uname -s),Darwin)
+	BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+	ifneq ($(BREW_PREFIX),)
+		INCLUDES += -I$(BREW_PREFIX)/include
+		LIBS += -L$(BREW_PREFIX)/lib
+	endif
+endif
 
 ifeq ($(shell uname -s),Linux)
 	LIBS += -lrt
